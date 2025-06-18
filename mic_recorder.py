@@ -242,7 +242,7 @@ def main():
     # Generate filename if not provided
     if args.output is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output = f"./mic_data/mic_diff_{args.frequency}Hz_{timestamp}.csv"
+        args.output = f"/home/wota/code/mic_data/mic_diff_{args.frequency}Hz_{timestamp}.csv"
 
     print("=" * 60)
     print("Contact Microphone Recorder - Differential Mode")
