@@ -17,6 +17,9 @@ import os
 try:
     import Adafruit_MCP3008
     import Adafruit_GPIO.SPI as SPI
+
+    if not os.path.exists("./mic_data"):
+        os.makedirs("./mic_data")
 except ImportError:
     print("Error: Please install required libraries:")
     print("sudo pip3 install Adafruit-MCP3008")
@@ -48,6 +51,11 @@ class ContactMicRecorder:
         # Rolling buffer for variance calculation
         self.voltage_buffer = deque(maxlen=self.variance_samples)
 
+        # For rolling Welford variance
+        self.mean = 0.0
+        self.M2 = 0.0
+        self.n = 0
+
         print(f"✓ Frequency: {frequency} Hz")
         print(f"✓ Variance window: {variance_window} seconds ({self.variance_samples} samples)")
 
@@ -64,123 +72,118 @@ class ContactMicRecorder:
             return None, None
 
     def calculate_variance(self):
-        """Calculate rolling variance"""
-        if len(self.voltage_buffer) < 2:
-            return 0.0
-        return np.var(list(self.voltage_buffer))
+        """Calculate rolling variance using Welford's algorithm"""
+        return self.M2 / self.n if self.n > 1 else 0.0
 
-    def read_bulk_differential(self, num_samples):
-        """Read multiple differential samples in a single burst SPI transaction"""
-        voltages = []
-        raw_values = []
-        for _ in range(num_samples):
-            voltage, raw = self.read_differential()
-            raw_values.append(raw)
-            voltages.append(voltage)
-
-        return voltages, raw_values
-
-    def record(self, duration, output_file, show_live=True):
+    def record(self, duration, output_file, show_live=True, rotate_minutes=1.0):
         """
-        Record microphone data
-
-        Args:
-            duration (float): Recording duration in seconds
-            output_file (str): CSV output filename
-            show_live (bool): Show live readings
+        Record microphone data at a steady rate using busy-wait timing with CSV rotation.
         """
+        import threading
+        from queue import Queue
+
         print(f"\nStarting recording for {duration} seconds...")
-
         if show_live:
             print("\nLive readings (Voltage | Variance | Samples):")
             print("-" * 50)
 
-        # Prepare data storage (pre-allocate for speed)
-        max_samples = int(duration * self.frequency * 1.2)  # 20% buffer
-        timestamps = []
-        voltages = []
-        raw_values = []
-        variances = []
+        queue = Queue()
+        stop_signal = object()
 
-        # Batch data for CSV writing
-        csv_batch = []
+        def writer_worker(base_filename):
+            file_count = 0
+            writer = None
+            csvfile = None
+            next_rotate_time = time.perf_counter() + (rotate_minutes * 60.0)
 
-        # Open CSV file for writing
-        with open(output_file, 'w', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow(['Timestamp_s', 'Voltage_V', 'Raw_ADC', 'Rolling_Variance'])
+            def open_new_file():
+                nonlocal writer, csvfile, file_count, next_rotate_time
+                if csvfile:
+                    csvfile.close()
+                suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{base_filename.rsplit('.', 1)[0]}_{suffix}.csv"
+                csvfile = open(filename, 'w', newline='')
+                writer = csv.writer(csvfile)
+                writer.writerow(['Timestamp_s', 'Voltage_V', 'Raw_ADC', 'Rolling_Variance'])
+                next_rotate_time = time.perf_counter() + (rotate_minutes * 60.0)
 
-            start_time = time.time()
-            sample_count = 0
-            last_display = 0
+            open_new_file()
 
-            BATCH = int(os.getenv("BATCH_SIZE", 10))
+            while True:
+                item = queue.get()
+                if item is stop_signal:
+                    break
+                timestamp, voltage, raw, var = item
+                if time.perf_counter() >= next_rotate_time and rotate_minutes > 0:
+                    open_new_file()
+                writer.writerow([f"{timestamp:.6f}", f"{voltage:.6f}", raw, f"{var:.8f}"])
+                queue.task_done()
 
-            try:
-                while True:
-                    batch_start = time.time()
-                    elapsed = batch_start - start_time
+            if csvfile:
+                csvfile.close()
 
-                    if elapsed >= duration:
-                        break
+        writer_thread = threading.Thread(target=writer_worker, args=(output_file,))
+        writer_thread.start()
 
-                    # Read sample(s) in bulk
-                    voltages_batch, raw_values_batch = self.read_bulk_differential(BATCH)
-                    for i, (voltage, raw_value) in enumerate(zip(voltages_batch, raw_values_batch)):
-                        sample_time = elapsed + i * self.sample_interval
+        total_samples = int(duration * self.frequency)
+        start_time = time.perf_counter()
+        next_time = start_time
+        last_display = start_time
+        sample_count = 0
 
-                        timestamps.append(sample_time)
-                        voltages.append(voltage)
-                        raw_values.append(raw_value)
+        try:
+            while True:
+                now = time.perf_counter()
+                if now < next_time:
+                    continue
 
-                        self.voltage_buffer.append(voltage)
-                        variance = self.calculate_variance()
-                        variances.append(variance)
+                voltage, raw = self.read_differential()
+                timestamp = now - start_time
 
-                        csv_batch.append([sample_time, voltage, raw_value, variance])
-                        sample_count += 1
+                x = voltage
+                if self.n < self.variance_samples:
+                    self.n += 1
+                    delta = x - self.mean
+                    self.mean += delta / self.n
+                    delta2 = x - self.mean
+                    self.M2 += delta * delta2
+                    self.voltage_buffer.append(x)
+                else:
+                    old = self.voltage_buffer.popleft()
+                    self.voltage_buffer.append(x)
+                    old_mean = self.mean
+                    delta_old = old - old_mean
+                    self.mean = ((self.mean * self.n) - old + x) / self.n
+                    delta_new = x - self.mean
+                    delta_old2 = old - self.mean
+                    self.M2 += delta_new * (x - self.mean) - delta_old * delta_old2
 
-                        if len(csv_batch) >= 50:
-                            for row in csv_batch:
-                                writer.writerow([f"{row[0]:.6f}", f"{row[1]:.6f}", row[2], f"{row[3]:.8f}"])
-                            csv_batch = []
-                            csvfile.flush()
+                var = self.calculate_variance()
 
-                        if show_live and (time.time() - last_display) >= 0.2:
-                            print(f"\r{voltage:+8.4f}V | {variance:10.6f} | {sample_count:6d}", end='', flush=True)
-                            last_display = time.time()
+                queue.put((timestamp, voltage, raw, var))
+                sample_count += 1
 
-                    time_spent = time.time() - batch_start
-                    time_expected = BATCH * self.sample_interval
-                    sleep_time = time_expected - time_spent
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
+                if show_live and (now - last_display) >= 0.2:
+                    print(f"\r{voltage:+8.4f}V | {var:10.6f} | {sample_count:6d}", end='', flush=True)
+                    last_display = now
 
-            except KeyboardInterrupt:
-                print(f"\n\nRecording stopped by user (Ctrl+C)")
+                next_time += self.sample_interval
 
-            # Write remaining CSV data
-            if csv_batch:
-                for row in csv_batch:
-                    writer.writerow([f"{row[0]:.6f}", f"{row[1]:.6f}", row[2], f"{row[3]:.8f}"])
-                csvfile.flush()
+                if timestamp >= duration or sample_count >= total_samples:
+                    break
 
-        # Calculate final statistics
-        actual_duration = timestamps[-1] if timestamps else 0
-        actual_frequency = len(timestamps) / actual_duration if actual_duration > 0 else 0
+        except KeyboardInterrupt:
+            print(f"\n\nRecording stopped by user (Ctrl+C)")
+
+        queue.put(stop_signal)
+        writer_thread.join()
 
         print(f"\n\n{'='*50}")
         print(f"Recording Complete!")
         print(f"{'='*50}")
-        print(f"Duration:        {actual_duration:.2f} seconds")
-        print(f"Samples:         {len(timestamps)}")
-        print(f"Actual freq:     {actual_frequency:.1f} Hz")
-        print(f"Mean voltage:    {np.mean(voltages):.4f} V")
-        print(f"Std deviation:   {np.std(voltages):.4f} V")
-        print(f"Min voltage:     {np.min(voltages):.4f} V")
-        print(f"Max voltage:     {np.max(voltages):.4f} V")
-        print(f"Final variance:  {variances[-1]:.6f}")
-        print(f"Data saved to:   {output_file}")
+        print(f"Samples:         {sample_count}")
+        print(f"Duration:        {timestamp:.2f} seconds")
+        print(f"Data saved to:   Rotating files with base name: {output_file}")
 
 def parse_arguments():
     """Parse command line arguments"""
@@ -223,6 +226,13 @@ def parse_arguments():
         help='Disable live display (faster recording)'
     )
 
+    parser.add_argument(
+        '-r', '--rotate',
+        type=float,
+        default=1.0,
+        help='CSV rotation interval in minutes (0 = single file)'
+    )
+
     return parser.parse_args()
 
 def main():
@@ -242,6 +252,7 @@ def main():
     print(f"Variance win:  {args.window} s")
     print(f"Output:        {args.output}")
     print(f"Live display:  {'No' if args.no_live else 'Yes'}")
+    print(f"Rotate every:  {args.rotate} min")
     print("=" * 60)
 
     # Initialize recorder
@@ -254,7 +265,8 @@ def main():
     recorder.record(
         duration=args.duration,
         output_file=args.output,
-        show_live=not args.no_live
+        show_live=not args.no_live,
+        rotate_minutes=args.rotate
     )
 
 if __name__ == "__main__":
