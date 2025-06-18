@@ -12,7 +12,6 @@ import numpy as np
 from collections import deque
 from datetime import datetime
 import sys
-import os
 
 try:
     import Adafruit_MCP3008
@@ -69,17 +68,6 @@ class ContactMicRecorder:
             return 0.0
         return np.var(list(self.voltage_buffer))
 
-    def read_bulk_differential(self, num_samples):
-        """Read multiple differential samples in a single burst SPI transaction"""
-        voltages = []
-        raw_values = []
-        for _ in range(num_samples):
-            voltage, raw = self.read_differential()
-            raw_values.append(raw)
-            voltages.append(voltage)
-
-        return voltages, raw_values
-
     def record(self, duration, output_file, show_live=True):
         """
         Record microphone data
@@ -114,47 +102,46 @@ class ContactMicRecorder:
             sample_count = 0
             last_display = 0
 
-            BATCH = int(os.getenv("BATCH_SIZE", 10))
-
             try:
                 while True:
-                    batch_start = time.time()
-                    elapsed = batch_start - start_time
+                    current_time = time.time()
+                    elapsed = current_time - start_time
 
                     if elapsed >= duration:
                         break
 
-                    # Read sample(s) in bulk
-                    voltages_batch, raw_values_batch = self.read_bulk_differential(BATCH)
-                    for i, (voltage, raw_value) in enumerate(zip(voltages_batch, raw_values_batch)):
-                        sample_time = elapsed + i * self.sample_interval
+                    # Read sample
+                    voltage, raw_value = self.read_differential()
 
-                        timestamps.append(sample_time)
+                    if voltage is not None:
+                        # Store data
+                        timestamps.append(elapsed)
                         voltages.append(voltage)
                         raw_values.append(raw_value)
 
+                        # Update rolling buffer
                         self.voltage_buffer.append(voltage)
                         variance = self.calculate_variance()
                         variances.append(variance)
 
-                        csv_batch.append([sample_time, voltage, raw_value, variance])
+                        # Batch CSV data
+                        csv_batch.append([elapsed, voltage, raw_value, variance])
+
                         sample_count += 1
 
+                        # Write CSV batch every 50 samples (more frequent for safety)
                         if len(csv_batch) >= 50:
                             for row in csv_batch:
                                 writer.writerow([f"{row[0]:.6f}", f"{row[1]:.6f}", row[2], f"{row[3]:.8f}"])
                             csv_batch = []
                             csvfile.flush()
 
-                        if show_live and (time.time() - last_display) >= 0.2:
+                        # Live display (every 200ms to reduce overhead)
+                        if show_live and (current_time - last_display) >= 0.2:
                             print(f"\r{voltage:+8.4f}V | {variance:10.6f} | {sample_count:6d}", end='', flush=True)
-                            last_display = time.time()
+                            last_display = current_time
 
-                    time_spent = time.time() - batch_start
-                    time_expected = BATCH * self.sample_interval
-                    sleep_time = time_expected - time_spent
-                    if sleep_time > 0:
-                        time.sleep(sleep_time)
+                    # No artificial delay - run as fast as possible
 
             except KeyboardInterrupt:
                 print(f"\n\nRecording stopped by user (Ctrl+C)")
@@ -232,7 +219,7 @@ def main():
     # Generate filename if not provided
     if args.output is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output = f"./mic_data/mic_diff_{args.frequency}Hz_{timestamp}.csv"
+        args.output = f"mic_diff_{args.frequency}Hz_{timestamp}.csv"
 
     print("=" * 60)
     print("Contact Microphone Recorder - Differential Mode")

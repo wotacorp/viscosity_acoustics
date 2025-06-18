@@ -7,6 +7,7 @@ requires-python = ">=3.10"
 dependencies = [
     "adafruit-io>=2.8.0",
     "adafruit-mcp3008>=1.0.2",
+    "matplotlib>=3.10.3",
     "numpy>=2.2.6",
     "pandas>=2.3.0",
     "pyftdi>=0.56.0",
