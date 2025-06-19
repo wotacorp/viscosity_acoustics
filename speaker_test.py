@@ -21,6 +21,8 @@ import pyaudio
 import sys
 import time
 
+device_index = 0
+
 def generate_tone(frequency=1000, duration=10, volume=30):
     """
     Generate a pure sine wave tone
@@ -57,7 +59,7 @@ def generate_tone(frequency=1000, duration=10, volume=30):
             channels=1,
             rate=sample_rate,
             output=True,
-            output_device_index=0
+            output_device_index=device_index
         )
         
         # Calculate total samples
@@ -125,7 +127,7 @@ def generate_white_noise(duration=10, volume=30):
             channels=1,
             rate=sample_rate,
             output=True,
-            output_device_index=0
+            output_device_index=device_index
         )
         
         # Calculate total samples
@@ -196,7 +198,7 @@ def generate_frequency_sweep(start_freq=100, end_freq=2000, duration=10, volume=
             channels=1,
             rate=sample_rate,
             output=True,
-            output_device_index=0
+            output_device_index=device_index
         )
         
         # Calculate total samples

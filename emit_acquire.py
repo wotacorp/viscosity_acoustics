@@ -8,11 +8,9 @@ acquire_cmd = [
 ]
 acquire_proc = subprocess.Popen(acquire_cmd)
 
-# Optional delay
-# time.sleep(1)
 
 # Start local tone
-# tone_proc = subprocess.run(["python", "speaker_test.py", "tone", "300", "15", "40"])
+# tone_proc = subprocess.run(["python", "speaker_test.py", "tone", "300", "5", "40"])
 sweep_proc = subprocess.run(["python", "speaker_test.py", "sweep", "300", "500", "5", "40"])
 
 # Wait for acquisition to finish
